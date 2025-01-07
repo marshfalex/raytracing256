@@ -4,6 +4,8 @@
 #include <fstream>
 #include <vector>
 #include "geometry.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 void render(){
     const int width = 1024;
@@ -17,7 +19,7 @@ void render(){
     }
 
     std::ofstream ofs;
-    ofs.open("./out.ppm");
+    ofs.open("./out.png", std::ofstream::binary);
     ofs << "P6\n" << width << " " << height << "\n255\n";
     for (size_t i = 0; i < height*width; ++i) {
         for (size_t j = 0; j<3; j++) {
