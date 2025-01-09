@@ -57,7 +57,19 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
             material = spheres[i].material;
         }
     }
-    return spheres_dist<1000;
+    float checkerboard_dist = std::numeric_limits<float>::max();
+    if (fabs(dir.y)>1e-3)  {
+        float d = -(orig.y+4)/dir.y; // the checkerboard plane has equation y = -4
+        Vec3f pt = orig + dir*d;
+        if (d>0 && fabs(pt.x)<10 && pt.z<-10 && pt.z>-30 && d<spheres_dist) {
+            checkerboard_dist = d;
+            hit = pt;
+            N = Vec3f(0,1,0);
+            material.diffuse_color = (int(.5*hit.x+1000) + int(.5*hit.z)) & 1 ? Vec3f(1,1,1) : Vec3f(1, .7, .3);
+            material.diffuse_color = material.diffuse_color*.3;
+        }
+    }
+    return std::min(spheres_dist, checkerboard_dist)<1000;
 }
 
 Vec3f refract(const Vec3f &I, const Vec3f &N, const float &refractive_index) { // Snell's law
@@ -141,10 +153,10 @@ int main() {
     Material red_rubber(1.0, Vec4f(0.9,  0.1, 0.0, 0.0), Vec3f(0.3, 0.1, 0.1),   10.);
     Material     mirror(1.0, Vec4f(0.0, 10.0, 0.8, 0.0), Vec3f(1.0, 1.0, 1.0), 1425.);
     std::vector<Sphere> spheres;
-    spheres.push_back(Sphere(Vec3f(-3,    0,   -16), 2,     mirror));
+    spheres.push_back(Sphere(Vec3f(-3,    0,   -16), 2,     ivory));
     spheres.push_back(Sphere(Vec3f(-1.0, -1.5, -12), 2,     glass));
     spheres.push_back(Sphere(Vec3f( 1.5, -0.5, -18), 3, red_rubber));
-    spheres.push_back(Sphere(Vec3f( 7,    5,   -18), 4,     ivory));
+    spheres.push_back(Sphere(Vec3f( 7,    5,   -18), 4,     mirror));
     std::vector<Light>  lights;
     lights.push_back(Light(Vec3f(-20, 20,  20), 1.5));
     lights.push_back(Light(Vec3f( 30, 50, -25), 1.8));
