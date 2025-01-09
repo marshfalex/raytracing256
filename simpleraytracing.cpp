@@ -5,8 +5,14 @@
 #include <fstream>
 #include <vector>
 #include "geometry.h"
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+int envmap_width, envmap_height;
+std::vector<Vec3f> envmap;
 
 struct Light {
     Light(const Vec3f &p, const float &i) : position(p), intensity(i) {}
@@ -57,6 +63,7 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
             material = spheres[i].material;
         }
     }
+
     float checkerboard_dist = std::numeric_limits<float>::max();
     if (fabs(dir.y)>1e-3)  {
         float d = -(orig.y+4)/dir.y; // the checkerboard plane has equation y = -4
@@ -65,31 +72,36 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
             checkerboard_dist = d;
             hit = pt;
             N = Vec3f(0,1,0);
-            material.diffuse_color = (int(.5*hit.x+1000) + int(.5*hit.z)) & 1 ? Vec3f(1,1,1) : Vec3f(1, .7, .3);
-            material.diffuse_color = material.diffuse_color*.3;
+            material.diffuse_color = (int(.5*hit.x+1000) + int(.5*hit.z)) & 1 ? Vec3f(.3, .3, .3) : Vec3f(.3, .2, .1);
         }
     }
     return std::min(spheres_dist, checkerboard_dist)<1000;
 }
 
-Vec3f refract(const Vec3f &I, const Vec3f &N, const float &refractive_index) { // Snell's law
+Vec3f refract(const Vec3f &I, const Vec3f &N, const float eta_t, const float eta_i=1.f) { // Snell's law
     float cosi = - std::max(-1.f, std::min(1.f, I*N));
-    float etai = 1, etat = refractive_index;
-    Vec3f n = N;
-    if (cosi < 0) { // if the ray is inside the object, swap the indices and invert the normal to get the correct result
-        cosi = -cosi;
-        std::swap(etai, etat); n = -N;
-    }
-    float eta = etai / etat;
+    if (cosi<0) return refract(I, -N, eta_i, eta_t); // if the ray comes from the inside the object, swap the air and the media
+    float eta = eta_i / eta_t;
     float k = 1 - eta*eta*(1 - cosi*cosi);
-    return k < 0 ? Vec3f(0,0,0) : I*eta + n*(eta * cosi - sqrtf(k));
+    return k<0 ? Vec3f(1,0,0) : I*eta + N*(eta*cosi - sqrtf(k)); // k<0 = total reflection, no ray to refract. I refract it anyways, this has no physical meaning
+}
+
+Vec3f get_background(const Vec3f &dir) {
+    float u = 0.5 + atan2(dir.z, dir.x)/(2*M_PI);
+    float v = 0.5 - asin(dir.y)/M_PI;
+    int i = u*envmap_width;
+    int j = v*envmap_height;
+    i = std::max(0, std::min(i, envmap_width-1));
+    j = std::max(0, std::min(j, envmap_height-1));
+    return envmap[i+j*envmap_width];
 }
 
 Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights, size_t depth=0) {
     Vec3f point, N;
     Material material;
-    if (depth > 4 || !scene_intersect(orig, dir, spheres, point, N, material)) {
-        return Vec3f(0.2, 0.7, 0.8); // background color
+
+    if (depth>4 || !scene_intersect(orig, dir, spheres, point, N, material)) {
+        return get_background(dir); // background color
     }
 
     Vec3f reflect_dir = reflect(dir, N).normalize();
@@ -101,66 +113,81 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
 
     float diffuse_light_intensity = 0, specular_light_intensity = 0;
     for (size_t i=0; i<lights.size(); i++) {
-        Vec3f light_dir = (lights[i].position - point).normalize();
+        Vec3f light_dir      = (lights[i].position - point).normalize();
         float light_distance = (lights[i].position - point).norm();
+
         Vec3f shadow_orig = light_dir*N < 0 ? point - N*1e-3 : point + N*1e-3; // checking if the point lies in the shadow of the lights[i]
         Vec3f shadow_pt, shadow_N;
         Material tmpmaterial;
         if (scene_intersect(shadow_orig, light_dir, spheres, shadow_pt, shadow_N, tmpmaterial) && (shadow_pt-shadow_orig).norm() < light_distance)
             continue;
 
-        diffuse_light_intensity += lights[i].intensity * std::max(0.f, light_dir*N);
+        diffuse_light_intensity  += lights[i].intensity * std::max(0.f, light_dir*N);
         specular_light_intensity += powf(std::max(0.f, -reflect(-light_dir, N)*dir), material.specular_exponent)*lights[i].intensity;
     }
-    return material.diffuse_color * diffuse_light_intensity * material.albedo[0] + Vec3f(1., 1., 1.)*specular_light_intensity * material.albedo[1]
-    + reflect_color*material.albedo[2] + refract_color*material.albedo[3];
+    return material.diffuse_color * diffuse_light_intensity * material.albedo[0] + Vec3f(1., 1., 1.)*specular_light_intensity * material.albedo[1] + reflect_color*material.albedo[2] + refract_color*material.albedo[3];
 }
 
 void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights) {
-    const int width = 1024;
-    const int height = 768;
-    const int fov = M_PI/2.;
+    const int   width    = 1024;
+    const int   height   = 768;
+    const float fov      = M_PI/3.;
     std::vector<Vec3f> framebuffer(width*height);
 
     #pragma omp parallel for
-
-    for (size_t j = 0; j<height; j++) {
+    for (size_t j = 0; j<height; j++) { // actual rendering loop
         for (size_t i = 0; i<width; i++) {
-            float x =  (2*(i + 0.5)/(float)width  - 1)*tan(fov/2.)*width/(float)height;
-            float y = -(2*(j + 0.5)/(float)height - 1)*tan(fov/2.);
-            Vec3f dir = Vec3f(x, y, -1).normalize();
-            framebuffer[i+j*width] = cast_ray(Vec3f(0,0,0), dir, spheres, lights);
+            float dir_x =  (i + 0.5) -  width/2.;
+            float dir_y = -(j + 0.5) + height/2.;    // this flips the image at the same time
+            float dir_z = -height/(2.*tan(fov/2.));
+            framebuffer[i+j*width] = cast_ray(Vec3f(0,0,0), Vec3f(dir_x, dir_y, dir_z).normalize(), spheres, lights);
         }
     }
 
-    std::ofstream ofs; // save the framebuffer to file
-    ofs.open("./out.ppm", std::ofstream::binary);
-    ofs << "P6\n" << width << " " << height << "\n255\n";
+    std::vector<unsigned char> pixmap(width*height*3);
     for (size_t i = 0; i < height*width; ++i) {
         Vec3f &c = framebuffer[i];
         float max = std::max(c[0], std::max(c[1], c[2]));
         if (max>1) c = c*(1./max);
         for (size_t j = 0; j<3; j++) {
-            ofs << (char)(255 * std::max(0.f, std::min(1.f, framebuffer[i][j])));
+            pixmap[i*3+j] = (unsigned char)(255 * std::max(0.f, std::min(1.f, framebuffer[i][j])));
         }
     }
-    ofs.close();
+    stbi_write_jpg("out.jpg", width, height, 3, pixmap.data(), 100);
 }
 
 int main() {
+    int n = -1;
+    unsigned char *pixmap = stbi_load("sky.jpg", &envmap_width, &envmap_height, &n, 0);
+    if (!pixmap || 3!=n) {
+        std::cerr << "Error: can not load the environment map" << std::endl;
+        return -1;
+    }
+    envmap = std::vector<Vec3f>(envmap_width*envmap_height);
+    for (int j = envmap_height-1; j>=0 ; j--) {
+        for (int i = 0; i<envmap_width; i++) {
+            envmap[i+j*envmap_width] = Vec3f(pixmap[(i+j*envmap_width)*3+0], pixmap[(i+j*envmap_width)*3+1], pixmap[(i+j*envmap_width)*3+2])*(1/255.);
+        }
+    }
+    stbi_image_free(pixmap);
+    
     Material      ivory(1.0, Vec4f(0.6,  0.3, 0.1, 0.0), Vec3f(0.4, 0.4, 0.3),   50.);
     Material      glass(1.5, Vec4f(0.0,  0.5, 0.1, 0.8), Vec3f(0.6, 0.7, 0.8),  125.);
     Material red_rubber(1.0, Vec4f(0.9,  0.1, 0.0, 0.0), Vec3f(0.3, 0.1, 0.1),   10.);
     Material     mirror(1.0, Vec4f(0.0, 10.0, 0.8, 0.0), Vec3f(1.0, 1.0, 1.0), 1425.);
+
     std::vector<Sphere> spheres;
     spheres.push_back(Sphere(Vec3f(-3,    0,   -16), 2,     ivory));
     spheres.push_back(Sphere(Vec3f(-1.0, -1.5, -12), 2,     glass));
     spheres.push_back(Sphere(Vec3f( 1.5, -0.5, -18), 3, red_rubber));
     spheres.push_back(Sphere(Vec3f( 7,    5,   -18), 4,     mirror));
+
     std::vector<Light>  lights;
     lights.push_back(Light(Vec3f(-20, 20,  20), 1.5));
     lights.push_back(Light(Vec3f( 30, 50, -25), 1.8));
     lights.push_back(Light(Vec3f( 30, 20,  30), 1.7));
+
     render(spheres, lights);
+
     return 0;
 }
